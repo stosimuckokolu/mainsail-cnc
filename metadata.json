@@ -1,0 +1,6 @@
+{
+  "name": "Mainsail CNC — Klipper Toolpath Controller",
+  "description": "Mainsail-inspired CNC controller for Klipper & Moonraker with real-time 3D G-code toolpath generation as the spindle moves across the table.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
