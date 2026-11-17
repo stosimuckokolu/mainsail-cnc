@@ -14,6 +14,7 @@ import { KlipperCncEngine } from './services/klipperCncEngine';
 import { CncViewport3D, CncViewportHandle } from './components/CncViewport3D';
 import { DroPanel } from './components/DroPanel';
 import { JogPanel } from './components/JogPanel';
+import { ScmHeadPanel } from './components/ScmHeadPanel';
 import { JobControlPanel } from './components/JobControlPanel';
 import { ConsolePanel } from './components/ConsolePanel';
 import { FilesView } from './components/FilesView';
@@ -21,47 +22,51 @@ import { MachineConfigView } from './components/MachineConfigView';
 import { Link2, OctagonAlert, RotateCcw } from 'lucide-react';
 
 const INITIAL_CONFIG: MachineConfig = {
-  name: 'Mainsail CNC Router',
+  name: 'SCM Tech 99L (Klipper Retrofit)',
   moonrakerUrl: 'http://mainsailos.local:7125',
-  bedSize: { x: 400, y: 300, z: 100 },
+  axisBounds: {
+    min: { x: -500, y: -1000, z: -10 },
+    max: { x: 3000, y: 500, z: 180 },
+  },
   spindleMaxRpm: 24000,
   spindleOutputPin: 'output_pin spindle',
-  defaultRapidFeed: 3200,
-  defaultCutFeed: 900,
+  defaultRapidFeed: 14000,
+  defaultCutFeed: 4500,
   probePlateThickness: 12.0,
   stockEnabled: true,
-  stockSize: { x: 140, y: 115, z: 18 },
+  stockSize: { x: 900, y: 600, z: 22 },
 };
 
 const INITIAL_TELEMETRY: KlipperTelemetry = {
   connectionMode: 'emulator',
   connectionStatus: 'connected',
-  statusMessage: 'Local Klipper CNC Motion Planner active',
+  statusMessage: 'SCM Tech 99L Klipper Motion Planner active',
   machineState: 'homed',
   homedAxes: { x: true, y: true, z: true },
-  machinePos: { x: 60, y: 45, z: 33 },
-  workPos: { x: 0, y: 0, z: 15 },
+  machinePos: { x: 0, y: 0, z: 67 },
+  workPos: { x: 0, y: 0, z: 45 },
   activeWcs: 'G54',
   wcsOffsets: {
-    G54: { x: 60, y: 45, z: 18 },
-    G55: { x: 120, y: 80, z: 18 },
-    G56: { x: 200, y: 120, z: 18 },
-    G57: { x: 50, y: 50, z: 18 },
-    G58: { x: 50, y: 50, z: 18 },
-    G59: { x: 50, y: 50, z: 18 },
+    G54: { x: 0, y: 0, z: 22 },
+    G55: { x: 1400, y: 0, z: 22 },
+    G56: { x: 0, y: -500, z: 22 },
+    G57: { x: 300, y: -150, z: 22 },
+    G58: { x: 1000, y: -200, z: 22 },
+    G59: { x: 2000, y: -200, z: 22 },
   },
   liveVelocity: 0,
   feedrateOverride: 100,
   spindleRpm: 0,
   spindleTargetRpm: 0,
   spindleOverride: 100,
+  activeTool: { mode: 'spindle', index: 0, label: 'Main Spindle (T0)' },
   activeLineIndex: -1,
   jobProgress: 0,
   jobFilename: SAMPLE_GCODE_FILES[0].name,
   jobElapsedSec: 0,
   isJobRunning: false,
   isJobPaused: false,
-  klipperVersion: 'v0.12.0-cnc-bench',
+  klipperVersion: 'v0.12.0-scm-tech99l',
 };
 
 export default function App() {
@@ -80,7 +85,7 @@ export default function App() {
       id: 'boot-1',
       timestamp: new Date().toTimeString().slice(0, 8),
       direction: 'info',
-      text: 'Mainsail CNC ready. Run a job, jog axes, or send MDI G-code to trace live on the table.',
+      text: 'SCM Tech 99L ready (Q4: X -500..3000, Y +500..-1000, Z +180..-10). Run job or test head tools.',
     },
   ]);
   const [liveTraceCount, setLiveTraceCount] = useState(0);
@@ -91,7 +96,6 @@ export default function App() {
   const traceCountRef = useRef(0);
   const lastTraceUiUpdateRef = useRef(0);
 
-  // Parsed G-code for planned toolpath preview & execution
   const parsedGCode = useMemo<ParsedGCode | null>(() => {
     if (!activeGcodeContent.trim()) return null;
     return parseGCode(
@@ -101,7 +105,6 @@ export default function App() {
     );
   }, [activeGcodeContent, config.defaultRapidFeed, config.defaultCutFeed]);
 
-  // Initialize Klipper CNC Engine once
   useEffect(() => {
     const engine = new KlipperCncEngine(INITIAL_CONFIG, {
       onTelemetry: (next) => {
@@ -134,7 +137,6 @@ export default function App() {
     };
   }, []);
 
-  // Sync initial G-code preview with engine
   useEffect(() => {
     if (parsedGCode && engineRef.current) {
       engineRef.current.setJobPreview(activeFilename, parsedGCode);
@@ -266,7 +268,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0e1116] text-slate-100 flex flex-col">
-      {/* Top Bar Contract: 3 zones (Wordmark — 4 Nav Links — 1 Primary Action) */}
       <header className="border-b border-slate-800/90 bg-[#131720] px-5 py-3 flex items-center justify-between gap-8">
         <a
           href="#dashboard"
@@ -326,9 +327,12 @@ export default function App() {
         </div>
       </header>
 
-      {/* Workspace Connection & Job Toolbar */}
       <div className="border-b border-slate-800/80 bg-[#10141c] px-5 py-2 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-3">
+          <span className="font-semibold text-slate-200">SCM Tech 99L</span>
+          <span className="text-slate-600" aria-hidden="true">
+            ·
+          </span>
           <span className={`font-semibold ${machineStateColor}`}>{machineStateLabel}</span>
           <span className="text-slate-600" aria-hidden="true">
             ·
@@ -391,7 +395,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Quick Job File Switcher */}
         <div className="flex items-center gap-2">
           <label className="text-slate-400 whitespace-nowrap" htmlFor="quick-job-select">
             Active Program
@@ -414,11 +417,9 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main Content Area */}
       <main className="flex-1 p-4 lg:p-5 max-w-[1680px] w-full mx-auto">
         {activeTab === 'dashboard' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            {/* Focal Anchor: 3D CNC Table & Live Toolpath Generation */}
             <div className="lg:col-span-8 h-[520px] lg:h-[calc(100vh-146px)] min-h-[500px]">
               <CncViewport3D
                 ref={viewportRef}
@@ -430,7 +431,6 @@ export default function App() {
               />
             </div>
 
-            {/* Right Control Deck */}
             <div className="lg:col-span-4 flex flex-col gap-3 lg:max-h-[calc(100vh-146px)] lg:overflow-y-auto pr-0.5">
               <DroPanel
                 telemetry={telemetry}
@@ -438,6 +438,11 @@ export default function App() {
                 onZeroAxis={(ax) => engineRef.current?.zeroWorkAxis(ax)}
                 onSelectWcs={(wcs: WcsName) => engineRef.current?.setActiveWcs(wcs)}
                 onSetSpindle={(rpm) => engineRef.current?.setSpindle(rpm)}
+              />
+
+              <ScmHeadPanel
+                activeTool={telemetry.activeTool}
+                onSelectTool={(tool) => engineRef.current?.selectHeadTool(tool)}
               />
 
               <JogPanel

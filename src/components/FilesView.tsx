@@ -22,9 +22,9 @@ export const FilesView: React.FC<FilesViewProps> = ({
   onRefreshMoonraker,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [customName, setCustomName] = useState('custom_pocket.nc');
+  const [customName, setCustomName] = useState('q4_panel_test.nc');
   const [customBody, setCustomBody] = useState(
-    `; Custom Klipper CNC Test Path\nG21\nG90\nM3 S14000\nG0 Z10\nG0 X20 Y20\nG1 Z-1.5 F250\nG1 X80 Y20 F1100\nG1 X80 Y70 F1100\nG1 X20 Y70 F1100\nG1 X20 Y20 F1100\nG0 Z12\nM5\nG0 X0 Y0\n`,
+    `; SCM Tech 99L — Quadrant 4 Test Program\nG21\nG90\nT0\nM3 S16000\nG0 Z35\nG0 X100 Y-100\nG1 Z-6.0 F1600\nG1 X650 Y-100 F5000\nG1 X650 Y-450 F5000\nG1 X100 Y-450 F5000\nG1 X100 Y-100 F5000\nG0 Z45\nM5\nG0 X0 Y0\n`,
   );
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -35,13 +35,12 @@ export const FilesView: React.FC<FilesViewProps> = ({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-      {/* File Library */}
       <section className="lg:col-span-7 bg-[#151922] border border-slate-800 rounded-lg p-5 flex flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-100">G-Code Files</h2>
             <p className="text-xs text-slate-400">
-              Load CNC programs onto the table preview or upload directly to Moonraker
+              Load Quadrant 4 CNC programs onto the SCM Tech 99L table or upload directly to Moonraker
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -130,12 +129,11 @@ export const FilesView: React.FC<FilesViewProps> = ({
         </div>
       </section>
 
-      {/* Quick G-Code Composer */}
       <section className="lg:col-span-5 bg-[#151922] border border-slate-800 rounded-lg p-5 flex flex-col gap-3">
         <div>
           <h2 className="text-base font-semibold text-slate-100">Quick G-Code Editor</h2>
           <p className="text-xs text-slate-400">
-            Write or paste CNC G-code and load it directly onto the 3D table
+            Write or paste Quadrant 4 G-code (T0 spindle, T1-T14 top drills, T21-T26 side drills, T30 saw)
           </p>
         </div>
 

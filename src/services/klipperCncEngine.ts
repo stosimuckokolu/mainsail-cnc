@@ -1,4 +1,5 @@
 import {
+  ActiveHeadTool,
   ConsoleEntry,
   KlipperTelemetry,
   LiveTraceSegment,
@@ -34,6 +35,20 @@ function makeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function toolCodeToActiveTool(code: number): ActiveHeadTool {
+  if (code >= 1 && code <= 14) {
+    return { mode: 'v_drill', index: code, label: `Top Drill V${code} (T${code})` };
+  }
+  if (code >= 21 && code <= 26) {
+    const idx = code - 20;
+    return { mode: 'h_drill', index: idx, label: `Side Drill H${idx} (T${code})` };
+  }
+  if (code === 30 || code === 90) {
+    return { mode: 'saw', index: 0, label: 'Circular Saw (T30)' };
+  }
+  return { mode: 'spindle', index: 0, label: 'Main Spindle (T0)' };
+}
+
 export class KlipperCncEngine {
   private config: MachineConfig;
   private telemetry: KlipperTelemetry;
@@ -47,42 +62,43 @@ export class KlipperCncEngine {
   private lastTickTime = 0;
   private rafId: number | null = null;
   private lastUiEmit = 0;
-  private lastRecordedMachinePos: Vec3 = { x: 0, y: 0, z: 25 };
+  private lastRecordedMachinePos: Vec3 = { x: 0, y: 0, z: 120 };
 
   constructor(initialConfig: MachineConfig, callbacks: EngineCallbacks) {
     this.config = initialConfig;
     this.callbacks = callbacks;
 
-    const defaultWcs = { x: 60, y: 45, z: 18 };
+    const defaultWcs: Vec3 = { x: 0, y: 0, z: initialConfig.stockSize.z };
     this.telemetry = {
       connectionMode: 'emulator',
       connectionStatus: 'connected',
-      statusMessage: 'Local Klipper CNC Motion Planner active',
+      statusMessage: 'SCM Tech 99L Klipper Motion Planner active',
       machineState: 'homed',
       homedAxes: { x: true, y: true, z: true },
-      machinePos: { x: defaultWcs.x, y: defaultWcs.y, z: defaultWcs.z + 15 },
-      workPos: { x: 0, y: 0, z: 15 },
+      machinePos: { x: 0, y: 0, z: defaultWcs.z + 45 },
+      workPos: { x: 0, y: 0, z: 45 },
       activeWcs: 'G54',
       wcsOffsets: {
         G54: { ...defaultWcs },
-        G55: { x: 120, y: 80, z: 18 },
-        G56: { x: 200, y: 120, z: 18 },
-        G57: { x: 50, y: 50, z: 18 },
-        G58: { x: 50, y: 50, z: 18 },
-        G59: { x: 50, y: 50, z: 18 },
+        G55: { x: 1400, y: 0, z: initialConfig.stockSize.z },
+        G56: { x: 0, y: -500, z: initialConfig.stockSize.z },
+        G57: { x: 300, y: -150, z: initialConfig.stockSize.z },
+        G58: { x: 1000, y: -200, z: initialConfig.stockSize.z },
+        G59: { x: 2000, y: -200, z: initialConfig.stockSize.z },
       },
       liveVelocity: 0,
       feedrateOverride: 100,
       spindleRpm: 0,
       spindleTargetRpm: 0,
       spindleOverride: 100,
+      activeTool: { mode: 'spindle', index: 0, label: 'Main Spindle (T0)' },
       activeLineIndex: -1,
       jobProgress: 0,
       jobFilename: null,
       jobElapsedSec: 0,
       isJobRunning: false,
       isJobPaused: false,
-      klipperVersion: 'v0.12.0-cnc-bench',
+      klipperVersion: 'v0.12.0-scm-tech99l',
     };
     this.lastRecordedMachinePos = { ...this.telemetry.machinePos };
 
@@ -130,6 +146,24 @@ export class KlipperCncEngine {
     this.config = next;
   }
 
+  public selectHeadTool(tool: ActiveHeadTool): void {
+    this.telemetry.activeTool = tool;
+    const tCode =
+      tool.mode === 'v_drill'
+        ? tool.index
+        : tool.mode === 'h_drill'
+          ? 20 + tool.index
+          : tool.mode === 'saw'
+            ? 30
+            : 0;
+    if (this.telemetry.connectionMode === 'moonraker') {
+      this.sendMdiCommand(`T${tCode}`);
+    } else {
+      this.logConsole('info', `Selected head unit: ${tool.label}`);
+    }
+    this.emitTelemetryNow();
+  }
+
   public setConnectionMode(mode: 'emulator' | 'moonraker'): void {
     if (mode === this.telemetry.connectionMode) return;
     this.motionQueue = [];
@@ -142,10 +176,10 @@ export class KlipperCncEngine {
       this.moonraker.disconnect();
       this.telemetry.connectionMode = 'emulator';
       this.telemetry.connectionStatus = 'connected';
-      this.telemetry.statusMessage = 'Local Klipper CNC Motion Planner active';
+      this.telemetry.statusMessage = 'SCM Tech 99L Klipper Motion Planner active';
       this.telemetry.machineState = 'homed';
-      this.telemetry.klipperVersion = 'v0.12.0-cnc-bench';
-      this.logConsole('info', 'Switched to Local Klipper Bench Motion Planner');
+      this.telemetry.klipperVersion = 'v0.12.0-scm-tech99l';
+      this.logConsole('info', 'Switched to Local SCM Tech 99L Bench Motion Planner');
       this.emitTelemetryNow();
     } else {
       this.telemetry.connectionMode = 'moonraker';
@@ -188,7 +222,6 @@ export class KlipperCncEngine {
         this.updateLiveMachinePosition({ x, y, z });
       }
       if (typeof payload.motion_report.live_velocity === 'number') {
-        // Klipper live_velocity is in mm/s -> convert to mm/min
         this.telemetry.liveVelocity = payload.motion_report.live_velocity * 60;
       }
     }
@@ -207,7 +240,6 @@ export class KlipperCncEngine {
       }
     }
 
-    // Spindle PWM pin lookup
     const pinKey = this.config.spindleOutputPin.includes(' ')
       ? this.config.spindleOutputPin
       : `output_pin ${this.config.spindleOutputPin}`;
@@ -279,15 +311,15 @@ export class KlipperCncEngine {
       z: nextPos.z - wcs.z,
     };
 
-    if (dist > 0.04) {
+    if (dist > 0.05) {
       let moveType: MoveType = explicitType ?? 'cut';
       if (!explicitType) {
         const horiz = Math.hypot(nextPos.x - prev.x, nextPos.y - prev.y);
-        if (this.telemetry.spindleRpm === 0 && this.telemetry.workPos.z > 0.25) {
+        if (this.telemetry.spindleRpm === 0 && this.telemetry.workPos.z > 0.5) {
           moveType = 'rapid';
-        } else if (horiz < 0.03 && nextPos.z < prev.z) {
+        } else if (horiz < 0.05 && nextPos.z < prev.z) {
           moveType = 'plunge';
-        } else if (this.telemetry.liveVelocity > this.config.defaultRapidFeed * 0.78 && this.telemetry.workPos.z > 0.2) {
+        } else if (this.telemetry.liveVelocity > this.config.defaultRapidFeed * 0.78 && this.telemetry.workPos.z > 0.5) {
           moveType = 'rapid';
         } else {
           moveType = 'cut';
@@ -354,7 +386,7 @@ export class KlipperCncEngine {
     this.telemetry.jobProgress = 0;
     this.telemetry.jobElapsedSec = 0;
     this.telemetry.activeLineIndex = 0;
-    this.logConsole('info', `Started CNC job: ${filename} (${parsed.segments.length} toolpath segments)`);
+    this.logConsole('info', `Started SCM Tech 99L job: ${filename} (${parsed.segments.length} segments)`);
     this.emitTelemetryNow();
   }
 
@@ -391,7 +423,7 @@ export class KlipperCncEngine {
     this.telemetry.spindleTargetRpm = 0;
     this.telemetry.liveVelocity = 0;
     this.telemetry.machineState = 'homed';
-    this.logConsole('info', 'Job cancelled; spindle stopped (M5)');
+    this.logConsole('info', 'Job cancelled; spindle & drills retracted (M5)');
     this.emitTelemetryNow();
   }
 
@@ -407,7 +439,7 @@ export class KlipperCncEngine {
     this.telemetry.spindleRpm = 0;
     this.telemetry.liveVelocity = 0;
     this.telemetry.machineState = 'estop';
-    this.logConsole('error', '!! EMERGENCY STOP (M112) — Motion halted, spindle disabled');
+    this.logConsole('error', '!! EMERGENCY STOP (M112) — Motion halted, heads disabled');
     this.emitTelemetryNow();
   }
 
@@ -418,13 +450,13 @@ export class KlipperCncEngine {
       return;
     }
     this.telemetry.machineState = 'homed';
-    this.telemetry.statusMessage = 'Klipper CNC ready';
-    this.logConsole('info', 'FIRMWARE_RESTART complete — Klipper CNC ready');
+    this.telemetry.statusMessage = 'SCM Tech 99L Klipper CNC ready';
+    this.logConsole('info', 'FIRMWARE_RESTART complete — SCM Tech 99L ready');
     this.emitTelemetryNow();
   }
 
   public jogAxis(axis: 'X' | 'Y' | 'Z', deltaMm: number, feedMmMin?: number): void {
-    const feed = feedMmMin ?? (axis === 'Z' ? 600 : 2400);
+    const feed = feedMmMin ?? (axis === 'Z' ? 2400 : 8000);
     if (this.telemetry.connectionMode === 'moonraker') {
       const cmd = `G91\nG0 ${axis}${deltaMm.toFixed(3)} F${feed}\nG90`;
       this.sendMdiCommand(cmd);
@@ -434,11 +466,12 @@ export class KlipperCncEngine {
       this.logConsole('error', 'Cannot jog while job is running or E-Stop is active');
       return;
     }
+    const { min, max } = this.config.axisBounds;
     const start = { ...this.telemetry.machinePos };
     const end = {
-      x: clamp(start.x + (axis === 'X' ? deltaMm : 0), 0, this.config.bedSize.x),
-      y: clamp(start.y + (axis === 'Y' ? deltaMm : 0), 0, this.config.bedSize.y),
-      z: clamp(start.z + (axis === 'Z' ? deltaMm : 0), -15, this.config.bedSize.z),
+      x: clamp(start.x + (axis === 'X' ? deltaMm : 0), min.x, max.x),
+      y: clamp(start.y + (axis === 'Y' ? deltaMm : 0), min.y, max.y),
+      z: clamp(start.z + (axis === 'Z' ? deltaMm : 0), min.z, max.z),
     };
     this.enqueueMachineMove(start, end, 'rapid', feed);
     this.logConsole('tx', `G91 G0 ${axis}${deltaMm.toFixed(2)} F${feed}`);
@@ -455,7 +488,7 @@ export class KlipperCncEngine {
     const end: Vec3 = {
       x: axes === 'all' || axes === 'X' ? 0 : start.x,
       y: axes === 'all' || axes === 'Y' ? 0 : start.y,
-      z: axes === 'all' || axes === 'Z' ? this.config.bedSize.z - 10 : start.z,
+      z: axes === 'all' || axes === 'Z' ? Math.max(0, this.config.axisBounds.max.z - 20) : start.z,
     };
     this.telemetry.homedAxes = {
       x: this.telemetry.homedAxes.x || axes === 'all' || axes === 'X',
@@ -469,20 +502,19 @@ export class KlipperCncEngine {
 
   public probeZ(): void {
     if (this.telemetry.connectionMode === 'moonraker') {
-      this.sendMdiCommand(`PROBE\nG92 Z${this.config.probePlateThickness.toFixed(3)}\nG0 Z10 F600`);
+      this.sendMdiCommand(`PROBE\nG92 Z${this.config.probePlateThickness.toFixed(3)}\nG0 Z35 F1800`);
       return;
     }
     if (this.telemetry.machineState === 'estop') return;
-    // Simulate probing down to stock top + plate thickness, setting Z zero, then retracting
     const wcs = this.telemetry.wcsOffsets[this.telemetry.activeWcs];
     const stockTopMachineZ = this.config.stockEnabled ? this.config.stockSize.z : 0;
     const start = { ...this.telemetry.machinePos };
     const touchPos = { x: start.x, y: start.y, z: stockTopMachineZ };
-    const retractPos = { x: start.x, y: start.y, z: stockTopMachineZ + 12 };
+    const retractPos = { x: start.x, y: start.y, z: stockTopMachineZ + 35 };
     wcs.z = stockTopMachineZ;
-    this.enqueueMachineMove(start, touchPos, 'plunge', 180);
-    this.enqueueMachineMove(touchPos, retractPos, 'rapid', 900);
-    this.logConsole('tx', `PROBE -> G92 Z0.000 (WCS ${this.telemetry.activeWcs} Z=${wcs.z.toFixed(2)})`);
+    this.enqueueMachineMove(start, touchPos, 'plunge', 450);
+    this.enqueueMachineMove(touchPos, retractPos, 'rapid', 2400);
+    this.logConsole('tx', `PROBE -> G92 Z0.000 (${this.telemetry.activeWcs} Z=${wcs.z.toFixed(2)})`);
     this.emitTelemetryNow();
   }
 
@@ -505,23 +537,23 @@ export class KlipperCncEngine {
       y: m.y - wcs.y,
       z: m.z - wcs.z,
     };
-    this.logConsole('info', `${this.telemetry.activeWcs} zeroed (${axis}) at MCS (${m.x.toFixed(2)}, ${m.y.toFixed(2)}, ${m.z.toFixed(2)})`);
+    this.logConsole('info', `${this.telemetry.activeWcs} zeroed (${axis}) at MCS (${m.x.toFixed(1)}, ${m.y.toFixed(1)}, ${m.z.toFixed(1)})`);
     this.emitTelemetryNow();
   }
 
   public goToWorkZero(): void {
     if (this.telemetry.connectionMode === 'moonraker') {
-      this.sendMdiCommand('G90\nG0 Z15 F1200\nG0 X0 Y0 F3000');
+      this.sendMdiCommand('G90\nG0 Z45 F3000\nG0 X0 Y0 F12000');
       return;
     }
     const wcs = this.telemetry.wcsOffsets[this.telemetry.activeWcs];
     const start = { ...this.telemetry.machinePos };
-    const safeZ = Math.max(start.z, wcs.z + 12);
+    const safeZ = Math.min(this.config.axisBounds.max.z, Math.max(start.z, wcs.z + 40));
     const lift = { x: start.x, y: start.y, z: safeZ };
     const target = { x: wcs.x, y: wcs.y, z: safeZ };
     this.enqueueMachineMove(start, lift, 'rapid', this.config.defaultRapidFeed);
     this.enqueueMachineMove(lift, target, 'rapid', this.config.defaultRapidFeed);
-    this.logConsole('tx', 'G90 G0 Z12 -> G0 X0 Y0');
+    this.logConsole('tx', 'G90 G0 Z40 -> G0 X0 Y0');
   }
 
   public setActiveWcs(wcs: WcsName): void {
@@ -573,7 +605,6 @@ export class KlipperCncEngine {
       return;
     }
 
-    // Local Bench MDI Execution: parse G-code relative to current workPos and queue live moves!
     const upper = trimmed.toUpperCase();
     if (upper === 'M112') {
       this.emergencyStop();
@@ -593,20 +624,23 @@ export class KlipperCncEngine {
       return;
     }
 
-    // Parse lines relative to current work coordinates
+    const tMatch = upper.match(/\bT(\d+)\b/);
+    if (tMatch) {
+      this.telemetry.activeTool = toolCodeToActiveTool(parseInt(tMatch[1], 10));
+    }
+
     const prefix = `G90\nG0 X${this.telemetry.workPos.x.toFixed(4)} Y${this.telemetry.workPos.y.toFixed(4)} Z${this.telemetry.workPos.z.toFixed(4)}\n`;
     const parsed = parseGCode(prefix + trimmed, this.config.defaultRapidFeed, this.config.defaultCutFeed);
 
-    // Check for M3 Sxxx without coordinates
     const sMatch = upper.match(/M3\s+S(\d+)/);
     if (sMatch) {
       this.telemetry.spindleTargetRpm = Math.min(this.config.spindleMaxRpm, parseInt(sMatch[1], 10));
     } else if (upper.includes('M3') && this.telemetry.spindleTargetRpm === 0) {
-      this.telemetry.spindleTargetRpm = 12000;
+      this.telemetry.spindleTargetRpm = 14000;
     }
 
-    // Skip the synthetic positioning segment (index 0 if it was zero length)
     const wcs = this.telemetry.wcsOffsets[this.telemetry.activeWcs];
+    const { min, max } = this.config.axisBounds;
     for (const seg of parsed.segments) {
       const lengthMm = Math.hypot(
         seg.end.x - seg.start.x,
@@ -615,12 +649,21 @@ export class KlipperCncEngine {
       );
       if (lengthMm < 1e-4) continue;
       this.motionQueue.push({
-        start: { x: seg.start.x + wcs.x, y: seg.start.y + wcs.y, z: seg.start.z + wcs.z },
-        end: { x: seg.end.x + wcs.x, y: seg.end.y + wcs.y, z: seg.end.z + wcs.z },
+        start: {
+          x: clamp(seg.start.x + wcs.x, min.x, max.x),
+          y: clamp(seg.start.y + wcs.y, min.y, max.y),
+          z: clamp(seg.start.z + wcs.z, min.z, max.z),
+        },
+        end: {
+          x: clamp(seg.end.x + wcs.x, min.x, max.x),
+          y: clamp(seg.end.y + wcs.y, min.y, max.y),
+          z: clamp(seg.end.z + wcs.z, min.z, max.z),
+        },
         type: seg.type,
         feedrate: seg.feedrate,
         lineNumber: -1,
         spindleRpm: seg.spindleRpm || this.telemetry.spindleTargetRpm,
+        toolCode: seg.toolCode,
         isMachineCoords: true,
         progressSoFar: 0,
         lengthMm,
@@ -666,7 +709,6 @@ export class KlipperCncEngine {
   }
 
   private stepEmulator(dt: number, now: number): void {
-    // Smooth spindle spin-up/down
     const rpmDiff = this.telemetry.spindleTargetRpm - this.telemetry.spindleRpm;
     if (Math.abs(rpmDiff) > 5) {
       this.telemetry.spindleRpm += rpmDiff * Math.min(1, dt * 8);
@@ -690,6 +732,7 @@ export class KlipperCncEngine {
     const overrideScale = this.telemetry.feedrateOverride / 100;
     let remainingTime = dt;
     let latestType: MoveType | undefined;
+    const { min, max } = this.config.axisBounds;
 
     while (remainingTime > 1e-5) {
       if (!this.activeSegment) {
@@ -706,14 +749,29 @@ export class KlipperCncEngine {
           this.telemetry.liveVelocity = 0;
           break;
         }
-        // Convert work coordinates -> machine coordinates on dequeue
         if (!next.isMachineCoords) {
           const wcs = this.telemetry.wcsOffsets[this.telemetry.activeWcs];
-          next.start = { x: next.start.x + wcs.x, y: next.start.y + wcs.y, z: next.start.z + wcs.z };
-          next.end = { x: next.end.x + wcs.x, y: next.end.y + wcs.y, z: next.end.z + wcs.z };
+          next.start = {
+            x: clamp(next.start.x + wcs.x, min.x, max.x),
+            y: clamp(next.start.y + wcs.y, min.y, max.y),
+            z: clamp(next.start.z + wcs.z, min.z, max.z),
+          };
+          next.end = {
+            x: clamp(next.end.x + wcs.x, min.x, max.x),
+            y: clamp(next.end.y + wcs.y, min.y, max.y),
+            z: clamp(next.end.z + wcs.z, min.z, max.z),
+          };
+          next.lengthMm = Math.hypot(
+            next.end.x - next.start.x,
+            next.end.y - next.start.y,
+            next.end.z - next.start.z,
+          );
           next.isMachineCoords = true;
         }
         this.activeSegment = next;
+        if (next.toolCode !== undefined) {
+          this.telemetry.activeTool = toolCodeToActiveTool(next.toolCode);
+        }
         if (next.spindleRpm !== undefined && this.telemetry.isJobRunning) {
           this.telemetry.spindleTargetRpm = next.spindleRpm;
         }
@@ -723,6 +781,11 @@ export class KlipperCncEngine {
       }
 
       const seg = this.activeSegment;
+      if (seg.lengthMm < 1e-5) {
+        this.activeSegment = null;
+        continue;
+      }
+
       const effectiveFeedMmMin =
         seg.type === 'rapid'
           ? seg.feedrate * Math.min(1.5, Math.max(0.25, overrideScale))
@@ -739,7 +802,6 @@ export class KlipperCncEngine {
         remainingTime -= distRemaining / speedMmSec;
         this.activeSegment = null;
         movedThisFrame = true;
-        // Flush exact segment end into live trace immediately so corners stay sharp
         this.updateLiveMachinePosition(this.telemetry.machinePos, seg.type);
       } else {
         seg.progressSoFar += travelPossible;
@@ -771,6 +833,7 @@ export class KlipperCncEngine {
   private emitTelemetryNow(): void {
     this.callbacks.onTelemetry({
       ...this.telemetry,
+      activeTool: { ...this.telemetry.activeTool },
       homedAxes: { ...this.telemetry.homedAxes },
       machinePos: { ...this.telemetry.machinePos },
       workPos: { ...this.telemetry.workPos },

@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
+  AxisBounds,
   CameraPreset,
   KlipperTelemetry,
   LiveTraceSegment,
@@ -44,7 +45,6 @@ interface CncViewport3DProps {
 const MAX_CUT_SEGS = 120000;
 const MAX_RAPID_SEGS = 40000;
 
-// Reusable math objects outside render loop (zero GC)
 const _raycaster = new THREE.Raycaster();
 const _mouse = new THREE.Vector2();
 const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -53,82 +53,133 @@ const _desiredCamPos = new THREE.Vector3();
 const _desiredTarget = new THREE.Vector3();
 
 function cncToWorld(x: number, y: number, z: number, out = new THREE.Vector3()): THREE.Vector3 {
+  // CNC: +X right, +Y back, +Z up -> Three.js: +X right, +Y up, -Z back
+  // Quadrant 4 (+X, -Y) maps directly to (+world.x, +world.z) in front of the operator.
   return out.set(x, z, -y);
 }
 
-function createSpoilboardTexture(bedX: number, bedY: number): THREE.CanvasTexture {
-  const pxPerMm = 4;
-  const w = Math.min(2048, Math.max(512, Math.round(bedX * pxPerMm)));
-  const h = Math.min(2048, Math.max(512, Math.round(bedY * pxPerMm)));
+function createSawBladeGeometry(radius: number, thickness: number, teeth = 28): THREE.BufferGeometry {
+  const shape = new THREE.Shape();
+  const innerR = radius * 0.91;
+  for (let i = 0; i < teeth; i++) {
+    const a0 = (i / teeth) * Math.PI * 2;
+    const a1 = ((i + 0.35) / teeth) * Math.PI * 2;
+    const a2 = ((i + 0.6) / teeth) * Math.PI * 2;
+    const x0 = Math.cos(a0) * innerR;
+    const y0 = Math.sin(a0) * innerR;
+    const x1 = Math.cos(a1) * radius;
+    const y1 = Math.sin(a1) * radius;
+    const x2 = Math.cos(a2) * innerR;
+    const y2 = Math.sin(a2) * innerR;
+    if (i === 0) shape.moveTo(x0, y0);
+    else shape.lineTo(x0, y0);
+    shape.lineTo(x1, y1);
+    shape.lineTo(x2, y2);
+  }
+  shape.closePath();
+
+  const bore = new THREE.Path();
+  bore.absarc(0, 0, 12, 0, Math.PI * 2, true);
+  shape.holes.push(bore);
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: thickness,
+    bevelEnabled: false,
+    steps: 1,
+  });
+  geo.center();
+  return geo;
+}
+
+function createQuadrant4BedTexture(bounds: AxisBounds): THREE.CanvasTexture {
+  const spanX = bounds.max.x - bounds.min.x; // 3500
+  const spanY = bounds.max.y - bounds.min.y; // 1500
+  const w = 2048;
+  const h = Math.max(512, Math.round((spanY / spanX) * w));
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d')!;
 
-  // Dark anodized slate MDF/aluminum spoilboard base
-  ctx.fillStyle = '#151922';
+  // World plane sits at X:[min.x..max.x], world.z:[-max.y..-min.y]
+  // UV top (py=0) corresponds to world.z = -max.y (cncY = +500, back)
+  // UV bottom (py=h) corresponds to world.z = -min.y (cncY = -1000, front)
+  const toPxX = (cncX: number) => ((cncX - bounds.min.x) / spanX) * w;
+  const toPxY = (cncY: number) => ((bounds.max.y - cncY) / spanY) * h;
+
+  // Base industrial slate floor inside machine enclosure
+  ctx.fillStyle = '#11151d';
   ctx.fillRect(0, 0, w, h);
 
-  const sx = w / bedX;
-  const sy = h / bedY;
+  // Highlight Quadrant 4 Active Panel Zone (X >= 0, Y <= 0)
+  const q4Left = toPxX(Math.max(0, bounds.min.x));
+  const q4Right = toPxX(bounds.max.x);
+  const q4Top = toPxY(Math.min(0, bounds.max.y));
+  const q4Bottom = toPxY(bounds.min.y);
+  ctx.fillStyle = '#161c26';
+  ctx.fillRect(q4Left, q4Top, q4Right - q4Left, q4Bottom - q4Top);
 
-  // T-slot horizontal grooves every 50mm
-  ctx.fillStyle = '#0f1219';
-  for (let y = 25; y < bedY; y += 50) {
-    const py = h - y * sy;
-    ctx.fillRect(0, py - 2.5, w, 5);
-    ctx.fillStyle = '#252c3b';
-    ctx.fillRect(0, py - 3, w, 1);
-    ctx.fillStyle = '#0f1219';
-  }
-
-  // Minor 10mm grid
+  // Minor 100mm grid
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.08)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let x = 0; x <= bedX; x += 10) {
-    const px = x * sx;
+  for (let x = Math.ceil(bounds.min.x / 100) * 100; x <= bounds.max.x; x += 100) {
+    const px = toPxX(x);
     ctx.moveTo(px, 0);
     ctx.lineTo(px, h);
   }
-  for (let y = 0; y <= bedY; y += 10) {
-    const py = h - y * sy;
+  for (let y = Math.ceil(bounds.min.y / 100) * 100; y <= bounds.max.y; y += 100) {
+    const py = toPxY(y);
     ctx.moveTo(0, py);
     ctx.lineTo(w, py);
   }
   ctx.stroke();
 
-  // Major 50mm grid
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
-  ctx.lineWidth = 1.2;
+  // Major 500mm grid
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.18)';
+  ctx.lineWidth = 1.4;
   ctx.beginPath();
-  for (let x = 0; x <= bedX; x += 50) {
-    const px = x * sx;
+  for (let x = Math.ceil(bounds.min.x / 500) * 500; x <= bounds.max.x; x += 500) {
+    const px = toPxX(x);
     ctx.moveTo(px, 0);
     ctx.lineTo(px, h);
   }
-  for (let y = 0; y <= bedY; y += 50) {
-    const py = h - y * sy;
+  for (let y = Math.ceil(bounds.min.y / 500) * 500; y <= bounds.max.y; y += 500) {
+    const py = toPxY(y);
     ctx.moveTo(0, py);
     ctx.lineTo(w, py);
   }
   ctx.stroke();
 
-  // Metric axis rulers
-  ctx.font = '600 18px "JetBrains Mono", monospace';
-  ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
+  // X=0 & Y=0 Datum Fence Lines
+  const zeroX = toPxX(0);
+  const zeroY = toPxY(0);
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(zeroX, 0);
+  ctx.lineTo(zeroX, h);
+  ctx.moveTo(0, zeroY);
+  ctx.lineTo(w, zeroY);
+  ctx.stroke();
+
+  // Coordinate ruler labels
+  ctx.font = '600 17px "JetBrains Mono", monospace';
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
   ctx.textBaseline = 'bottom';
-  for (let x = 50; x < bedX; x += 50) {
-    ctx.fillText(`${x}`, x * sx + 4, h - 6);
-  }
-  ctx.textBaseline = 'top';
-  for (let y = 50; y < bedY; y += 50) {
-    ctx.fillText(`${y}`, 8, h - y * sy + 4);
+  for (let x = Math.ceil(bounds.min.x / 500) * 500; x <= bounds.max.x; x += 500) {
+    const px = toPxX(x);
+    ctx.fillText(`X${x}`, Math.min(w - 75, px + 5), h - 8);
   }
 
-  // Origin label
-  ctx.fillStyle = 'rgba(56, 189, 248, 0.85)';
-  ctx.fillText('MCS (0,0)', 8, h - 26);
+  ctx.textBaseline = 'top';
+  for (let y = Math.ceil(bounds.min.y / 500) * 500; y <= bounds.max.y; y += 500) {
+    const py = toPxY(y);
+    ctx.fillText(`Y${y}`, 8, Math.min(h - 24, py + 5));
+  }
+
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+  ctx.fillText('SCM TECH 99L · QUADRANT 4 (X+ / Y-)', zeroX + 12, zeroY + 10);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -151,7 +202,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
     const [hoverCoord, setHoverCoord] = useState<{ x: number; y: number } | null>(null);
     const [webglLost, setWebglLost] = useState(false);
 
-    // Refs synced with latest React state/props
     const telemetryRef = useRef(telemetry);
     telemetryRef.current = telemetry;
     const configRef = useRef(config);
@@ -173,7 +223,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       followTool,
     };
 
-    // Scene / dynamic buffer handles
     const sceneHandlesRef = useRef<{
       appendLiveSegment: (seg: LiveTraceSegment) => void;
       clearLiveTrace: () => void;
@@ -194,7 +243,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       },
     }));
 
-    // Initialize WebGL Scene once
     useEffect(() => {
       const container = mountRef.current;
       if (!container) return;
@@ -215,7 +263,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       });
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.1;
+      renderer.toneMappingExposure = 1.12;
       renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
       renderer.shadowMap.enabled = !isSoftwareGl;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -234,7 +282,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color('#0c0f14');
-      scene.fog = new THREE.Fog('#0c0f14', 650, 1600);
+      scene.fog = new THREE.Fog('#0c0f14', 3200, 8200);
 
       const pmremGenerator = new THREE.PMREMGenerator(renderer);
       scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -242,123 +290,116 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
 
       const width = container.clientWidth || 800;
       const height = container.clientHeight || 600;
-      const camera = new THREE.PerspectiveCamera(42, width / height, 0.5, 3000);
-      const bed = configRef.current.bedSize;
-      camera.position.set(bed.x * 0.5, bed.z * 2.2 + 80, -bed.y * 0.1 + 290);
+      const camera = new THREE.PerspectiveCamera(40, width / height, 2, 14000);
+      // Initial isometric framing centered on Quadrant 4 panel area
+      camera.position.set(1180, 920, 1480);
 
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = !isSoftwareGl;
       controls.dampingFactor = 0.07;
-      controls.minDistance = 30;
-      controls.maxDistance = 1200;
+      controls.minDistance = 80;
+      controls.maxDistance = 6500;
       controls.maxPolarAngle = Math.PI * 0.49;
-      controls.target.set(bed.x * 0.45, 10, -bed.y * 0.45);
+      controls.target.set(480, 25, 300);
       controls.update();
 
       // 3-point studio lighting
-      const hemi = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.75);
+      const hemi = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.85);
       scene.add(hemi);
 
-      const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.45);
-      keyLight.position.set(bed.x * 0.7, 320, 220);
+      const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.4);
+      keyLight.position.set(1400, 1800, 1200);
       keyLight.castShadow = !isSoftwareGl;
       if (keyLight.castShadow) {
         keyLight.shadow.mapSize.set(1024, 1024);
-        keyLight.shadow.camera.left = -300;
-        keyLight.shadow.camera.right = 300;
-        keyLight.shadow.camera.top = 300;
-        keyLight.shadow.camera.bottom = -300;
-        keyLight.shadow.bias = -0.0005;
+        keyLight.shadow.camera.left = -2200;
+        keyLight.shadow.camera.right = 2200;
+        keyLight.shadow.camera.top = 1500;
+        keyLight.shadow.camera.bottom = -1500;
+        keyLight.shadow.camera.far = 5000;
+        keyLight.shadow.bias = -0.0006;
         keyLight.shadow.normalBias = 0.02;
       }
       scene.add(keyLight);
 
       const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.65);
-      rimLight.position.set(-180, 160, -280);
+      rimLight.position.set(-1200, 900, -1400);
       scene.add(rimLight);
 
-      // Floor plane underneath machine
-      const floorGeo = new THREE.PlaneGeometry(3000, 3000);
+      // Shop floor plane
+      const floorGeo = new THREE.PlaneGeometry(14000, 14000);
       const floorMat = new THREE.MeshStandardMaterial({
-        color: 0x0b0e13,
-        roughness: 0.92,
+        color: 0x090c11,
+        roughness: 0.94,
         metalness: 0.05,
       });
       const floorMesh = new THREE.Mesh(floorGeo, floorMat);
       floorMesh.rotation.x = -Math.PI / 2;
-      floorMesh.position.y = -24;
+      floorMesh.position.y = -110;
       scene.add(floorMesh);
 
-      // Bed & Frame Group
       const bedGroup = new THREE.Group();
       scene.add(bedGroup);
       let bedTex: THREE.CanvasTexture | null = null;
 
-      // Stock Workpiece Group
       const stockGroup = new THREE.Group();
       scene.add(stockGroup);
 
       // WCS Origin Triad
       const wcsTriad = new THREE.Group();
-      const triadLen = 28;
-      const xAxisGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0, 0, 0),
-        new THREE.Vector3(triadLen, 0, 0),
-      ]);
-      const yAxisGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0, 0, 0),
-        new THREE.Vector3(0, 0, -triadLen),
-      ]);
-      const zAxisGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0, 0, 0),
-        new THREE.Vector3(0, triadLen, 0),
-      ]);
-      wcsTriad.add(new THREE.Line(xAxisGeo, new THREE.LineBasicMaterial({ color: 0xef4444 })));
-      wcsTriad.add(new THREE.Line(yAxisGeo, new THREE.LineBasicMaterial({ color: 0x22c55e })));
-      wcsTriad.add(new THREE.Line(zAxisGeo, new THREE.LineBasicMaterial({ color: 0x38bdf8 })));
+      const triadLen = 90;
+      wcsTriad.add(
+        new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(triadLen, 0, 0),
+          ]),
+          new THREE.LineBasicMaterial({ color: 0xef4444 }),
+        ),
+      );
+      wcsTriad.add(
+        new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(0, 0, -triadLen),
+          ]),
+          new THREE.LineBasicMaterial({ color: 0x22c55e }),
+        ),
+      );
+      wcsTriad.add(
+        new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(0, triadLen, 0),
+          ]),
+          new THREE.LineBasicMaterial({ color: 0x38bdf8 }),
+        ),
+      );
       const originRing = new THREE.Mesh(
-        new THREE.RingGeometry(2.2, 3.4, 24),
+        new THREE.RingGeometry(8, 12, 24),
         new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide }),
       );
       originRing.rotation.x = -Math.PI / 2;
-      originRing.position.y = 0.08;
+      originRing.position.y = 0.25;
       wcsTriad.add(originRing);
       scene.add(wcsTriad);
 
-      // Gantry Rail & X-Carriage Group (tracks toolhead X & Y)
+      // SCM Tech 99L Cantilever / Rear-Beam Gantry Assembly (tracks X along rear Y=+500)
       const gantryGroup = new THREE.Group();
-      const gantryBeamMat = new THREE.MeshStandardMaterial({
-        color: 0x1e2430,
-        metalness: 0.72,
-        roughness: 0.35,
-        transparent: true,
-        opacity: 0.52,
+      const scmCreamMat = new THREE.MeshStandardMaterial({
+        color: 0xd6d9de,
+        metalness: 0.25,
+        roughness: 0.52,
       });
-      const gantryBeam = new THREE.Mesh(
-        new THREE.BoxGeometry(bed.x + 36, 16, 18),
-        gantryBeamMat,
-      );
-      gantryBeam.position.set(bed.x / 2, bed.z + 24, 0);
-      gantryGroup.add(gantryBeam);
-
-      const xCarriage = new THREE.Mesh(
-        new THREE.BoxGeometry(28, 24, 24),
-        new THREE.MeshStandardMaterial({
-          color: 0x2b3444,
-          metalness: 0.8,
-          roughness: 0.28,
-        }),
-      );
-      xCarriage.position.set(0, bed.z + 24, 0);
-      gantryGroup.add(xCarriage);
-      scene.add(gantryGroup);
-
-      // Composite 7-Part CNC Spindle & Endmill Assembly (THREE.Group)
-      const spindleGroup = new THREE.Group();
+      const scmSlateMat = new THREE.MeshStandardMaterial({
+        color: 0x1e2532,
+        metalness: 0.55,
+        roughness: 0.42,
+      });
       const darkAnodizedMat = new THREE.MeshStandardMaterial({
-        color: 0x1e2530,
-        metalness: 0.65,
-        roughness: 0.45,
+        color: 0x1a202c,
+        metalness: 0.72,
+        roughness: 0.38,
       });
       const brushedAluMat = new THREE.MeshStandardMaterial({
         color: 0xcbd5e1,
@@ -367,8 +408,8 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       });
       const blackOxideMat = new THREE.MeshStandardMaterial({
         color: 0x111827,
-        metalness: 0.82,
-        roughness: 0.3,
+        metalness: 0.84,
+        roughness: 0.28,
       });
       const carbideMat = new THREE.MeshStandardMaterial({
         color: 0xe2e8f0,
@@ -378,77 +419,253 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       const activeTipMat = new THREE.MeshStandardMaterial({
         color: 0x38bdf8,
         emissive: 0x0ea5e9,
-        emissiveIntensity: 0.5,
+        emissiveIntensity: 0.45,
         roughness: 0.2,
-        metalness: 0.6,
+        metalness: 0.65,
+      });
+      const activeDrillMat = new THREE.MeshStandardMaterial({
+        color: 0x22d3ee,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 0.7,
+        metalness: 0.85,
+        roughness: 0.2,
+      });
+      const steelDrillMat = new THREE.MeshStandardMaterial({
+        color: 0x94a3b8,
+        metalness: 0.88,
+        roughness: 0.24,
       });
 
-      // Part 1: Z-axis mount plate
-      const zPlate = new THREE.Mesh(new THREE.BoxGeometry(22, 54, 8), darkAnodizedMat);
-      zPlate.position.set(0, 48, -14);
-      zPlate.castShadow = !isSoftwareGl;
-      spindleGroup.add(zPlate);
+      // Cantilever X-Tower + Y-Arm tracking toolhead X
+      const xTower = new THREE.Group();
+      const towerBase = new THREE.Mesh(new THREE.BoxGeometry(220, 260, 180), scmSlateMat);
+      towerBase.position.set(0, 130, -560);
+      xTower.add(towerBase);
 
-      // Part 2: Spindle clamp collar
-      const clampCollar = new THREE.Mesh(
-        new THREE.CylinderGeometry(14, 14, 14, 24),
-        darkAnodizedMat,
-      );
-      clampCollar.position.set(0, 44, 0);
-      spindleGroup.add(clampCollar);
+      const cantileverArm = new THREE.Mesh(new THREE.BoxGeometry(190, 85, 1650), scmCreamMat);
+      cantileverArm.position.set(0, 285, 220);
+      cantileverArm.castShadow = !isSoftwareGl;
+      xTower.add(cantileverArm);
 
-      // Part 3: Brushed aluminum spindle body
+      const yRail = new THREE.Mesh(new THREE.BoxGeometry(36, 18, 1600), brushedAluMat);
+      yRail.position.set(85, 250, 220);
+      xTower.add(yRail);
+
+      gantryGroup.add(xTower);
+      scene.add(gantryGroup);
+
+      // =========================================================================
+      // SCM Tech 99L Composite Machining Head (THREE.Group)
+      // - Main Routing Electrospindle (T0) at local (0, 0, 0)
+      // - Boring Block with 14 Top (Vertical) Drills (9 along X + 5 along Y, 32mm grid)
+      // - 6 Side (Horizontal) Edge Drills (4 along X [2+2], 2 along Y [1+1])
+      // - 1 Circular Grooving Saw (125mm diameter blade + guard hood)
+      // =========================================================================
+      const headGroup = new THREE.Group();
+
+      // Main Z-Carriage & SCM Head Shroud
+      const zCarriagePlate = new THREE.Mesh(new THREE.BoxGeometry(360, 190, 48), scmSlateMat);
+      zCarriagePlate.position.set(125, 160, -145);
+      headGroup.add(zCarriagePlate);
+
+      const headCover = new THREE.Mesh(new THREE.BoxGeometry(350, 130, 160), scmCreamMat);
+      headCover.position.set(125, 185, -45);
+      headCover.castShadow = !isSoftwareGl;
+      headGroup.add(headCover);
+
+      // 1) Main Routing Electrospindle (ISO30 / HSK63F) at local (0,0,0)
       const spindleBody = new THREE.Mesh(
-        new THREE.CylinderGeometry(12, 12, 46, 28),
+        new THREE.CylinderGeometry(36, 36, 130, 24),
         brushedAluMat,
       );
-      spindleBody.position.set(0, 48, 0);
+      spindleBody.position.set(0, 125, 0);
       spindleBody.castShadow = !isSoftwareGl;
-      spindleGroup.add(spindleBody);
+      headGroup.add(spindleBody);
 
-      // Part 4: Top cooling fan cap
-      const topCap = new THREE.Mesh(
-        new THREE.CylinderGeometry(12.8, 12.8, 7, 24),
+      const spindleClamp = new THREE.Mesh(
+        new THREE.CylinderGeometry(42, 42, 34, 24),
+        darkAnodizedMat,
+      );
+      spindleClamp.position.set(0, 125, 0);
+      headGroup.add(spindleClamp);
+
+      const mainRotor = new THREE.Group();
+      const isoTaper = new THREE.Mesh(
+        new THREE.CylinderGeometry(20, 15, 22, 18),
         blackOxideMat,
       );
-      topCap.position.set(0, 74, 0);
-      spindleGroup.add(topCap);
+      isoTaper.position.set(0, 49, 0);
+      mainRotor.add(isoTaper);
 
-      // Spinning Rotor Sub-group (Part 5: ER20 Collet Nut, Part 6: Shank, Part 7: Fluted Bit)
-      const rotorGroup = new THREE.Group();
       const colletNut = new THREE.Mesh(
-        new THREE.CylinderGeometry(7.2, 6.2, 10, 6),
+        new THREE.CylinderGeometry(14, 12, 16, 6),
         blackOxideMat,
       );
-      colletNut.position.set(0, 21, 0);
-      rotorGroup.add(colletNut);
+      colletNut.position.set(0, 31, 0);
+      mainRotor.add(colletNut);
 
-      const endmillShank = new THREE.Mesh(
-        new THREE.CylinderGeometry(2.2, 2.2, 12, 16),
+      const routerShank = new THREE.Mesh(
+        new THREE.CylinderGeometry(5, 5, 18, 12),
         carbideMat,
       );
-      endmillShank.position.set(0, 11, 0);
-      rotorGroup.add(endmillShank);
+      routerShank.position.set(0, 15, 0);
+      mainRotor.add(routerShank);
 
-      const endmillFlutes = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.6, 1.5, 6, 12),
+      const routerFlutes = new THREE.Mesh(
+        new THREE.CylinderGeometry(4, 3.6, 12, 12),
         activeTipMat,
       );
-      endmillFlutes.position.set(0, 3, 0);
-      rotorGroup.add(endmillFlutes);
+      routerFlutes.position.set(0, 6, 0);
+      mainRotor.add(routerFlutes);
+      headGroup.add(mainRotor);
 
-      spindleGroup.add(rotorGroup);
-      scene.add(spindleGroup);
+      // 2) SCM Boring Manifold Housing (offset beside main spindle: +X = +95..+365, -Z = -40..-210)
+      const boringBlock = new THREE.Mesh(
+        new THREE.BoxGeometry(285, 68, 175),
+        darkAnodizedMat,
+      );
+      boringBlock.position.set(205, 108, -75);
+      boringBlock.castShadow = !isSoftwareGl;
+      headGroup.add(boringBlock);
+
+      // 14 Top (Vertical) Drills on 32mm Pitch Grid (9 along X + 5 along Y)
+      const vDrillRefs: Array<{ group: THREE.Group; bitMesh: THREE.Mesh; baseY: number }> = [];
+      const vDrillCoords: Array<[number, number]> = [];
+      // 9 spindles along X (32mm pitch) at local z = -15
+      for (let i = 0; i < 9; i++) {
+        vDrillCoords.push([85 + i * 32, -15]);
+      }
+      // 5 spindles along Y (32mm pitch into -Z) at local x = 85
+      for (let j = 1; j <= 5; j++) {
+        vDrillCoords.push([85, -15 - j * 32]);
+      }
+
+      vDrillCoords.forEach(([lx, lz]) => {
+        const dGroup = new THREE.Group();
+        const baseY = 48; // retracted above main bit tip
+        dGroup.position.set(lx, baseY, lz);
+
+        const sleeve = new THREE.Mesh(
+          new THREE.CylinderGeometry(7.5, 7.5, 34, 12),
+          brushedAluMat,
+        );
+        sleeve.position.set(0, 26, 0);
+        dGroup.add(sleeve);
+
+        const chuck = new THREE.Mesh(
+          new THREE.CylinderGeometry(5.5, 4.5, 12, 10),
+          blackOxideMat,
+        );
+        chuck.position.set(0, 6, 0);
+        dGroup.add(chuck);
+
+        const bit = new THREE.Mesh(
+          new THREE.CylinderGeometry(2.6, 2.2, 26, 10),
+          steelDrillMat.clone(),
+        );
+        bit.position.set(0, -12, 0);
+        dGroup.add(bit);
+
+        headGroup.add(dGroup);
+        vDrillRefs.push({ group: dGroup, bitMesh: bit, baseY });
+      });
+
+      // 3) 6 Side (Horizontal) Edge-Boring Drills (4 in X [2 +X, 2 -X], 2 in Y [1 +Y, 1 -Y])
+      const hDrillSpecs: Array<{
+        pos: [number, number, number];
+        dir: [number, number, number];
+        rot: [number, number, number];
+      }> = [
+        // H1, H2: +X facing
+        { pos: [348, 86, -40], dir: [1, 0, 0], rot: [0, 0, -Math.PI / 2] },
+        { pos: [348, 86, -72], dir: [1, 0, 0], rot: [0, 0, -Math.PI / 2] },
+        // H3, H4: -X facing (mounted on left side of boring block, clear of spindle)
+        { pos: [62, 86, -105], dir: [-1, 0, 0], rot: [0, 0, Math.PI / 2] },
+        { pos: [62, 86, -137], dir: [-1, 0, 0], rot: [0, 0, Math.PI / 2] },
+        // H5: +Y facing (toward rear -Z in Three.js)
+        { pos: [175, 86, -162], dir: [0, 0, -1], rot: [-Math.PI / 2, 0, 0] },
+        // H6: -Y facing (toward front operator +Z in Three.js)
+        { pos: [207, 86, 12], dir: [0, 0, 1], rot: [Math.PI / 2, 0, 0] },
+      ];
+
+      const hDrillRefs: Array<{
+        group: THREE.Group;
+        bitMesh: THREE.Mesh;
+        basePos: THREE.Vector3;
+        dir: THREE.Vector3;
+      }> = [];
+
+      hDrillSpecs.forEach((spec) => {
+        const hg = new THREE.Group();
+        const basePos = new THREE.Vector3(...spec.pos);
+        hg.position.copy(basePos);
+        hg.rotation.set(...spec.rot);
+
+        const collar = new THREE.Mesh(
+          new THREE.CylinderGeometry(6.5, 6.5, 16, 12),
+          blackOxideMat,
+        );
+        collar.position.set(0, 6, 0);
+        hg.add(collar);
+
+        const bit = new THREE.Mesh(
+          new THREE.CylinderGeometry(2.4, 2.0, 28, 10),
+          steelDrillMat.clone(),
+        );
+        bit.position.set(0, 24, 0);
+        hg.add(bit);
+
+        headGroup.add(hg);
+        hDrillRefs.push({
+          group: hg,
+          bitMesh: bit,
+          basePos,
+          dir: new THREE.Vector3(...spec.dir),
+        });
+      });
+
+      // 4) 1 Circular Grooving Saw Unit (125mm blade oriented along X-axis)
+      const sawGroup = new THREE.Group();
+      const sawBaseY = 72;
+      sawGroup.position.set(275, sawBaseY, -125);
+
+      const sawGuard = new THREE.Mesh(
+        new THREE.CylinderGeometry(68, 68, 16, 20, 1, false, 0, Math.PI),
+        scmSlateMat,
+      );
+      sawGuard.rotation.x = Math.PI / 2;
+      sawGuard.rotation.z = 0;
+      sawGroup.add(sawGuard);
+
+      const sawBladeGeo = createSawBladeGeometry(62.5, 3.2, 28);
+      const sawBladeMat = new THREE.MeshStandardMaterial({
+        color: 0xe2e8f0,
+        metalness: 0.92,
+        roughness: 0.18,
+      });
+      const sawBladeMesh = new THREE.Mesh(sawBladeGeo, sawBladeMat);
+      sawBladeMesh.castShadow = !isSoftwareGl;
+      sawGroup.add(sawBladeMesh);
+
+      const sawFlange = new THREE.Mesh(
+        new THREE.CylinderGeometry(18, 18, 8, 16),
+        blackOxideMat,
+      );
+      sawFlange.rotation.x = Math.PI / 2;
+      sawGroup.add(sawFlange);
+
+      headGroup.add(sawGroup);
+      scene.add(headGroup);
 
       // Projected Laser Crosshair Ring on Table / Stock
       const laserGroup = new THREE.Group();
       const laserRing = new THREE.Mesh(
-        new THREE.RingGeometry(2.8, 3.6, 28),
+        new THREE.RingGeometry(8, 11, 28),
         new THREE.MeshBasicMaterial({
           color: 0x22d3ee,
           side: THREE.DoubleSide,
           transparent: true,
-          opacity: 0.75,
+          opacity: 0.8,
         }),
       );
       laserRing.rotation.x = -Math.PI / 2;
@@ -462,7 +679,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         new THREE.LineBasicMaterial({
           color: 0x22d3ee,
           transparent: true,
-          opacity: 0.35,
+          opacity: 0.4,
         }),
       );
       laserGroup.add(dropLine);
@@ -474,17 +691,17 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       const plannedCutMat = new THREE.LineBasicMaterial({
         color: 0x38bdf8,
         transparent: true,
-        opacity: 0.32,
+        opacity: 0.34,
       });
       const plannedRapidMat = new THREE.LineBasicMaterial({
         color: 0xf59e0b,
         transparent: true,
-        opacity: 0.16,
+        opacity: 0.18,
       });
       let plannedCutLines: THREE.LineSegments | null = null;
       let plannedRapidLines: THREE.LineSegments | null = null;
 
-      // Live Generated Toolpath Buffers (Zero-GC pre-allocated)
+      // Live Generated Toolpath Buffers (Zero-GC)
       const liveCutPositions = new Float32Array(MAX_CUT_SEGS * 2 * 3);
       const liveCutColors = new Float32Array(MAX_CUT_SEGS * 2 * 3);
       const liveCutGeo = new THREE.BufferGeometry();
@@ -518,7 +735,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         new THREE.LineBasicMaterial({
           color: 0xf59e0b,
           transparent: true,
-          opacity: 0.62,
+          opacity: 0.65,
         }),
       );
       liveRapidMesh.frustumCulled = false;
@@ -529,7 +746,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       let rapidSegCount = 0;
 
       const rebuildBedAndStock = (cfg: MachineConfig, wcsOffset: Vec3) => {
-        // Clear old bed children
         while (bedGroup.children.length > 0) {
           const ch = bedGroup.children.pop()!;
           ch.traverse((o) => {
@@ -544,51 +760,114 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           bedTex = null;
         }
 
-        const bx = cfg.bedSize.x;
-        const by = cfg.bedSize.y;
-        const bz = cfg.bedSize.z;
+        const { min, max } = cfg.axisBounds;
+        const spanX = Math.max(100, max.x - min.x);
+        const spanY = Math.max(100, max.y - min.y);
+        const spanZ = Math.max(40, max.z - min.z);
+        const centerX = (min.x + max.x) * 0.5;
+        const centerWorldZ = -((min.y + max.y) * 0.5);
 
-        bedTex = createSpoilboardTexture(bx, by);
+        bedTex = createQuadrant4BedTexture(cfg.axisBounds);
         bedTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-        const bedPlate = new THREE.Mesh(
-          new THREE.BoxGeometry(bx, 12, by),
+        // Main Machine Bed Base below vacuum consoles (sits at world.y = -70..-98)
+        const baseDeck = new THREE.Mesh(
+          new THREE.BoxGeometry(spanX, 24, spanY),
           [
-            new THREE.MeshStandardMaterial({ color: 0x1c222d, roughness: 0.5, metalness: 0.6 }),
-            new THREE.MeshStandardMaterial({ color: 0x1c222d, roughness: 0.5, metalness: 0.6 }),
-            new THREE.MeshStandardMaterial({
-              map: bedTex,
-              roughness: 0.72,
-              metalness: 0.18,
-            }),
-            new THREE.MeshStandardMaterial({ color: 0x101319, roughness: 0.8 }),
-            new THREE.MeshStandardMaterial({ color: 0x1c222d, roughness: 0.5, metalness: 0.6 }),
-            new THREE.MeshStandardMaterial({ color: 0x1c222d, roughness: 0.5, metalness: 0.6 }),
+            new THREE.MeshStandardMaterial({ color: 0x1a202c, roughness: 0.55, metalness: 0.55 }),
+            new THREE.MeshStandardMaterial({ color: 0x1a202c, roughness: 0.55, metalness: 0.55 }),
+            new THREE.MeshStandardMaterial({ map: bedTex, roughness: 0.78, metalness: 0.16 }),
+            new THREE.MeshStandardMaterial({ color: 0x0e1117, roughness: 0.85 }),
+            new THREE.MeshStandardMaterial({ color: 0x1a202c, roughness: 0.55, metalness: 0.55 }),
+            new THREE.MeshStandardMaterial({ color: 0x1a202c, roughness: 0.55, metalness: 0.55 }),
           ],
         );
-        bedPlate.position.set(bx / 2, -6.05, -by / 2);
-        bedPlate.receiveShadow = !isSoftwareGl;
-        bedGroup.add(bedPlate);
+        baseDeck.position.set(centerX, -82, centerWorldZ);
+        baseDeck.receiveShadow = !isSoftwareGl;
+        bedGroup.add(baseDeck);
 
-        // Machine envelope wireframe
-        const envGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(bx, bz, by));
+        // Pod-and-Rail Vacuum Consoles in Quadrant 4 (top of pods at Z=0 datum!)
+        const consoleXPositions = [110, 480, 920, 1450, 2050, 2680].filter(
+          (x) => x >= min.x + 80 && x <= max.x - 80,
+        );
+        const railLenY = Math.min(1040, Math.abs(min.y) + 40);
+        const railGeo = new THREE.BoxGeometry(64, 34, railLenY);
+        const railMat = new THREE.MeshStandardMaterial({
+          color: 0x334155,
+          metalness: 0.72,
+          roughness: 0.34,
+        });
+        const podGeo = new THREE.BoxGeometry(135, 36, 135);
+        const podMat = new THREE.MeshStandardMaterial({
+          color: 0x1e2430,
+          metalness: 0.3,
+          roughness: 0.7,
+        });
+        const stopPinGeo = new THREE.CylinderGeometry(8, 8, 22, 14);
+        const stopPinMat = new THREE.MeshStandardMaterial({
+          color: 0xf59e0b,
+          metalness: 0.75,
+          roughness: 0.28,
+        });
+
+        const railsInst = new THREE.InstancedMesh(railGeo, railMat, consoleXPositions.length);
+        const podYPositions = [-140, -480, -820].filter((y) => y >= min.y + 80);
+        const podsInst = new THREE.InstancedMesh(
+          podGeo,
+          podMat,
+          consoleXPositions.length * podYPositions.length,
+        );
+        const pinsInst = new THREE.InstancedMesh(stopPinGeo, stopPinMat, consoleXPositions.length + 1);
+
+        const dummy = new THREE.Object3D();
+        let podIdx = 0;
+        consoleXPositions.forEach((cx, idx) => {
+          // Console rail sits from y=-53 to y=-19 under pods
+          dummy.position.set(cx, -53, railLenY * 0.5 - 20);
+          dummy.updateMatrix();
+          railsInst.setMatrixAt(idx, dummy.matrix);
+
+          // Rear Reference Stop Pin at Y=0
+          dummy.position.set(cx, 6, 0);
+          dummy.updateMatrix();
+          pinsInst.setMatrixAt(idx, dummy.matrix);
+
+          podYPositions.forEach((py) => {
+            // Pod top sits cleanly at world.y = -0.2 (Z=0 panel bottom datum)
+            dummy.position.set(cx, -18.5, -py);
+            dummy.updateMatrix();
+            podsInst.setMatrixAt(podIdx++, dummy.matrix);
+          });
+        });
+        // Left side stop pin at X=0, Y=-250
+        dummy.position.set(0, 6, 250);
+        dummy.updateMatrix();
+        pinsInst.setMatrixAt(consoleXPositions.length, dummy.matrix);
+
+        railsInst.instanceMatrix.needsUpdate = true;
+        podsInst.instanceMatrix.needsUpdate = true;
+        pinsInst.instanceMatrix.needsUpdate = true;
+        railsInst.computeBoundingSphere();
+        podsInst.computeBoundingSphere();
+        pinsInst.computeBoundingSphere();
+        bedGroup.add(railsInst);
+        bedGroup.add(podsInst);
+        bedGroup.add(pinsInst);
+
+        // Work envelope wireframe spanning X[min..max], Y[min..max], Z[min..max]
+        const envGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(spanX, spanZ, spanY));
         const envWire = new THREE.LineSegments(
           envGeo,
           new THREE.LineBasicMaterial({
             color: 0x334155,
             transparent: true,
-            opacity: 0.45,
+            opacity: 0.42,
           }),
         );
-        envWire.position.set(bx / 2, bz / 2, -by / 2);
+        envWire.position.set(centerX, (min.z + max.z) * 0.5, centerWorldZ);
         bedGroup.add(envWire);
 
-        // Update gantry beam width
-        gantryBeam.geometry.dispose();
-        gantryBeam.geometry = new THREE.BoxGeometry(bx + 36, 16, 18);
-        gantryBeam.position.y = bz + 24;
-
-        // Rebuild Stock Block
+        // Stock Workpiece in Quadrant 4 (+X width, -Y depth, +Z thickness)
         while (stockGroup.children.length > 0) {
           const ch = stockGroup.children.pop()!;
           ch.traverse((o) => {
@@ -605,25 +884,26 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           const stockMesh = new THREE.Mesh(
             new THREE.BoxGeometry(sx, sz, sy),
             new THREE.MeshStandardMaterial({
-              color: 0x64748b,
-              metalness: 0.65,
-              roughness: 0.38,
+              color: 0xb48c64, // Baltic birch / MDF wood panel tone
+              metalness: 0.12,
+              roughness: 0.68,
               transparent: true,
-              opacity: 0.24,
+              opacity: 0.34,
               polygonOffset: true,
               polygonOffsetFactor: 1,
               polygonOffsetUnits: 1,
             }),
           );
-          stockMesh.position.set(wcsOffset.x + sx / 2, sz / 2, -(wcsOffset.y + sy / 2));
+          // Quadrant 4: starts at (wcs.x, wcs.y) and goes +X, -Y (world +Z)
+          stockMesh.position.set(wcsOffset.x + sx / 2, sz / 2, -wcsOffset.y + sy / 2);
           stockGroup.add(stockMesh);
 
           const stockEdges = new THREE.LineSegments(
             new THREE.EdgesGeometry(new THREE.BoxGeometry(sx, sz, sy)),
             new THREE.LineBasicMaterial({
-              color: 0x94a3b8,
+              color: 0xd6b08a,
               transparent: true,
-              opacity: 0.45,
+              opacity: 0.55,
             }),
           );
           stockEdges.position.copy(stockMesh.position);
@@ -710,7 +990,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           liveCutPositions[base + 4] = ey;
           liveCutPositions[base + 5] = ez;
 
-          // Z-depth shading: plunge = bright coral-amber, deeper cuts = vivid emerald-cyan
           const wcsZ = telemetryRef.current.wcsOffsets[telemetryRef.current.activeWcs].z;
           const relZ = seg.end.z - wcsZ;
           let r = 0.08;
@@ -721,10 +1000,10 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
             g = 0.44;
             b = 0.36;
           } else if (relZ < -0.1) {
-            const depthT = Math.min(1, Math.abs(relZ) / 6);
+            const depthT = Math.min(1, Math.abs(relZ) / 16);
             r = 0.05 + depthT * 0.08;
             g = 0.86 - depthT * 0.14;
-            b = 0.66 + depthT * 0.32; // shifts emerald -> vivid cyan on deeper passes
+            b = 0.66 + depthT * 0.32;
           }
 
           liveCutColors[base] = r;
@@ -752,7 +1031,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         liveRapidGeo.setDrawRange(0, 0);
       };
 
-      // Smooth damped camera transitions
       let camTransitionActive = false;
       const cancelCamTransition = () => {
         camTransitionActive = false;
@@ -763,30 +1041,37 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         const cfg = configRef.current;
         const t = telemetryRef.current;
         const wcs = t.wcsOffsets[t.activeWcs];
-        const cx = cfg.stockEnabled ? wcs.x + cfg.stockSize.x * 0.5 : cfg.bedSize.x * 0.5;
-        const cy = cfg.stockEnabled ? wcs.y + cfg.stockSize.y * 0.5 : cfg.bedSize.y * 0.5;
-        const cz = wcs.z * 0.5;
+        const { min, max } = cfg.axisBounds;
 
-        _desiredTarget.set(cx, cz, -cy);
-        if (preset === 'iso') {
-          _desiredCamPos.set(cx + 120, cz + 170, -cy + 210);
-        } else if (preset === 'top') {
-          _desiredCamPos.set(cx, cz + 290, -cy + 0.5);
-        } else if (preset === 'front') {
-          _desiredCamPos.set(cx, cz + 55, -cy + 270);
-        } else if (preset === 'side') {
-          _desiredCamPos.set(cx + 270, cz + 65, -cy);
+        // Quadrant 4 stock center: X from wcs.x to wcs.x + stockSize.x; Y from wcs.y down to wcs.y - stockSize.y
+        const stockCenterX = cfg.stockEnabled
+          ? wcs.x + cfg.stockSize.x * 0.5
+          : (min.x + max.x) * 0.5;
+        const stockCenterY = cfg.stockEnabled
+          ? wcs.y - cfg.stockSize.y * 0.5
+          : (min.y + max.y) * 0.5;
+        const stockCenterZ = wcs.z * 0.5;
+
+        if (preset === 'fit') {
+          const bx = (min.x + max.x) * 0.5;
+          const by = (min.y + max.y) * 0.5;
+          _desiredTarget.set(bx, 35, -by);
+          _desiredCamPos.set(bx + 200, 1850, -by + 2500);
         } else {
-          // fit bed
-          const bx = cfg.bedSize.x * 0.5;
-          const by = cfg.bedSize.y * 0.5;
-          _desiredTarget.set(bx, 10, -by);
-          _desiredCamPos.set(bx, 240, -by + 330);
+          _desiredTarget.set(stockCenterX, stockCenterZ, -stockCenterY);
+          if (preset === 'iso') {
+            _desiredCamPos.set(stockCenterX + 700, stockCenterZ + 880, -stockCenterY + 1150);
+          } else if (preset === 'top') {
+            _desiredCamPos.set(stockCenterX, stockCenterZ + 1450, -stockCenterY + 2);
+          } else if (preset === 'front') {
+            _desiredCamPos.set(stockCenterX, stockCenterZ + 220, -stockCenterY + 1350);
+          } else if (preset === 'side') {
+            _desiredCamPos.set(stockCenterX + 1450, stockCenterZ + 240, -stockCenterY);
+          }
         }
         camTransitionActive = true;
       };
 
-      // Initial build
       const initWcs = telemetryRef.current.wcsOffsets[telemetryRef.current.activeWcs];
       rebuildBedAndStock(configRef.current, initWcs);
       sceneHandlesRef.current = {
@@ -797,7 +1082,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         rebuildBedAndStock,
       };
 
-      // Throttled pointer raycast for live table XY coordinates
       let lastRaycast = 0;
       const onPointerMove = (e: PointerEvent) => {
         const now = performance.now();
@@ -810,15 +1094,11 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         const wcs = telemetryRef.current.wcsOffsets[telemetryRef.current.activeWcs];
         _plane.constant = -wcs.z;
         if (_raycaster.ray.intersectPlane(_plane, _hitPoint)) {
-          const wx = _hitPoint.x - wcs.x;
-          const wy = -_hitPoint.z - wcs.y;
-          if (
-            _hitPoint.x >= -10 &&
-            _hitPoint.x <= configRef.current.bedSize.x + 10 &&
-            -_hitPoint.z >= -10 &&
-            -_hitPoint.z <= configRef.current.bedSize.y + 10
-          ) {
-            setHoverCoord({ x: wx, y: wy });
+          const mx = _hitPoint.x;
+          const my = -_hitPoint.z;
+          const { min, max } = configRef.current.axisBounds;
+          if (mx >= min.x - 50 && mx <= max.x + 50 && my >= min.y - 50 && my <= max.y + 50) {
+            setHoverCoord({ x: mx - wcs.x, y: my - wcs.y });
           } else {
             setHoverCoord(null);
           }
@@ -828,7 +1108,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       renderer.domElement.addEventListener('pointermove', onPointerMove);
       renderer.domElement.addEventListener('pointerleave', onPointerLeave);
 
-      // Resize observer
       const resizeObserver = new ResizeObserver(() => {
         if (!container) return;
         const w = container.clientWidth;
@@ -871,27 +1150,86 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         const t = telemetryRef.current;
         const layers = layersRef.current;
         const wcs = t.wcsOffsets[t.activeWcs];
+        const tool = t.activeTool;
 
-        // Update spindle & gantry positions
-        cncToWorld(t.machinePos.x, t.machinePos.y, t.machinePos.z, spindleGroup.position);
-        gantryBeam.position.z = -t.machinePos.y - 18;
-        xCarriage.position.set(t.machinePos.x, configRef.current.bedSize.z + 24, -t.machinePos.y - 18);
+        // Position SCM Tech 99L Head & Cantilever X-Tower
+        cncToWorld(t.machinePos.x, t.machinePos.y, t.machinePos.z, headGroup.position);
+        xTower.position.x = t.machinePos.x + 125;
         gantryGroup.visible = layers.showGantry;
 
-        // Spin endmill when spindle RPM > 0
-        if (t.spindleRpm > 0) {
-          rotorGroup.rotation.y += dt * Math.min(45, (t.spindleRpm / 1000) * 3.2);
-          activeTipMat.emissiveIntensity = t.workPos.z <= 0.2 ? 1.4 : 0.45;
+        // Animate active tool (Main Spindle, 14 Top Drills, 6 Side Drills, or Circular Saw)
+        const spinActive = t.spindleRpm > 0 || t.isJobRunning;
+        const spinRate = dt * Math.min(48, Math.max(8, (t.spindleRpm / 1000) * 3.5));
+
+        if (tool.mode === 'spindle' && t.spindleRpm > 0) {
+          mainRotor.rotation.y += spinRate;
+          activeTipMat.emissiveIntensity = t.workPos.z <= 0.5 ? 1.4 : 0.5;
         } else {
           activeTipMat.emissiveIntensity = 0.08;
         }
 
+        // Pneumatic drop & spin on the 14 Top Drills
+        vDrillRefs.forEach((dr, idx) => {
+          const isSelected = tool.mode === 'v_drill' && tool.index === idx + 1;
+          const targetY = isSelected ? dr.baseY - 34 : dr.baseY;
+          dr.group.position.y = THREE.MathUtils.damp(dr.group.position.y, targetY, 14, dt);
+          const mat = dr.bitMesh.material as THREE.MeshStandardMaterial;
+          if (isSelected) {
+            mat.color.setHex(0x22d3ee);
+            mat.emissive.setHex(0x06b6d4);
+            mat.emissiveIntensity = 0.7;
+            if (spinActive) dr.group.rotation.y += spinRate;
+          } else {
+            mat.color.setHex(0x94a3b8);
+            mat.emissive.setHex(0x000000);
+            mat.emissiveIntensity = 0;
+          }
+        });
+
+        // Pneumatic extension & spin on the 6 Side Drills
+        hDrillRefs.forEach((hd, idx) => {
+          const isSelected = tool.mode === 'h_drill' && tool.index === idx + 1;
+          const ext = isSelected ? 22 : 0;
+          const tx = hd.basePos.x + hd.dir.x * ext;
+          const ty = hd.basePos.y + hd.dir.y * ext;
+          const tz = hd.basePos.z + hd.dir.z * ext;
+          hd.group.position.x = THREE.MathUtils.damp(hd.group.position.x, tx, 14, dt);
+          hd.group.position.y = THREE.MathUtils.damp(hd.group.position.y, ty, 14, dt);
+          hd.group.position.z = THREE.MathUtils.damp(hd.group.position.z, tz, 14, dt);
+          const mat = hd.bitMesh.material as THREE.MeshStandardMaterial;
+          if (isSelected) {
+            mat.color.setHex(0x22d3ee);
+            mat.emissive.setHex(0x06b6d4);
+            mat.emissiveIntensity = 0.7;
+            if (spinActive) hd.bitMesh.rotation.y += spinRate;
+          } else {
+            mat.color.setHex(0x94a3b8);
+            mat.emissive.setHex(0x000000);
+            mat.emissiveIntensity = 0;
+          }
+        });
+
+        // Circular Grooving Saw drop & spin
+        const sawActive = tool.mode === 'saw';
+        const sawTargetY = sawActive ? sawBaseY - 46 : sawBaseY;
+        sawGroup.position.y = THREE.MathUtils.damp(sawGroup.position.y, sawTargetY, 12, dt);
+        if (sawActive) {
+          sawBladeMat.color.setHex(0x38bdf8);
+          sawBladeMat.emissive.setHex(0x0284c7);
+          sawBladeMat.emissiveIntensity = 0.45;
+          if (spinActive) sawBladeMesh.rotation.z -= spinRate * 0.8;
+        } else {
+          sawBladeMat.color.setHex(0xe2e8f0);
+          sawBladeMat.emissive.setHex(0x000000);
+          sawBladeMat.emissiveIntensity = 0;
+        }
+
         // Laser crosshair on table/stock surface
         const surfaceY = wcs.z;
-        laserGroup.position.set(t.machinePos.x, surfaceY + 0.08, -t.machinePos.y);
+        laserGroup.position.set(t.machinePos.x, surfaceY + 0.25, -t.machinePos.y);
         const heightAboveSurface = Math.max(0.2, t.machinePos.z - surfaceY);
         dropLine.scale.y = heightAboveSurface;
-        dropLine.visible = t.machinePos.z > surfaceY + 0.1;
+        dropLine.visible = t.machinePos.z > surfaceY + 0.2;
 
         // Layer visibility
         plannedGroup.visible = layers.showPlanned;
@@ -923,8 +1261,8 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           controls.target.y = THREE.MathUtils.damp(controls.target.y, _desiredTarget.y, 7, dt);
           controls.target.z = THREE.MathUtils.damp(controls.target.z, _desiredTarget.z, 7, dt);
           if (
-            camera.position.distanceTo(_desiredCamPos) < 0.4 &&
-            controls.target.distanceTo(_desiredTarget) < 0.4
+            camera.position.distanceTo(_desiredCamPos) < 1.5 &&
+            controls.target.distanceTo(_desiredTarget) < 1.5
           ) {
             camTransitionActive = false;
           }
@@ -954,6 +1292,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
         renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
         liveCutGeo.dispose();
         liveRapidGeo.dispose();
+        sawBladeGeo.dispose();
         floorGeo.dispose();
         floorMat.dispose();
         if (bedTex) bedTex.dispose();
@@ -964,19 +1303,20 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
       };
     }, []);
 
-    // Rebuild planned toolpath when G-code or active WCS changes
     const activeWcsOffset = telemetry.wcsOffsets[telemetry.activeWcs];
     useEffect(() => {
       sceneHandlesRef.current?.rebuildPlannedPath(parsedGCode, activeWcsOffset);
     }, [parsedGCode, activeWcsOffset.x, activeWcsOffset.y, activeWcsOffset.z]);
 
-    // Rebuild bed / stock when machine config or WCS changes
     useEffect(() => {
       sceneHandlesRef.current?.rebuildBedAndStock(config, activeWcsOffset);
     }, [
-      config.bedSize.x,
-      config.bedSize.y,
-      config.bedSize.z,
+      config.axisBounds.min.x,
+      config.axisBounds.min.y,
+      config.axisBounds.min.z,
+      config.axisBounds.max.x,
+      config.axisBounds.max.y,
+      config.axisBounds.max.z,
       config.stockEnabled,
       config.stockSize.x,
       config.stockSize.y,
@@ -988,7 +1328,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
 
     return (
       <div className="relative w-full h-full min-h-[460px] bg-[#0c0f14] rounded-lg border border-slate-800/90 overflow-hidden select-none">
-        {/* Isolated WebGL mount container */}
         <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
         {webglLost && (
@@ -997,16 +1336,20 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           </div>
         )}
 
-        {/* Top-Left Live Table Telemetry HUD (no backdrop-blur over WebGL) */}
+        {/* Top-Left Live Table & Head Telemetry HUD */}
         <div className="pointer-events-none absolute top-3 left-3 flex flex-col gap-1.5 z-10">
-          <div className="bg-[#11151d]/90 border border-slate-700/70 rounded-md px-3 py-2 flex items-center gap-4 text-xs">
+          <div className="bg-[#11151d]/90 border border-slate-700/70 rounded-md px-3 py-2 flex flex-wrap items-center gap-3 text-xs">
             <div className="flex items-center gap-2">
               <span className="text-slate-400 font-medium">{telemetry.activeWcs}</span>
               <span className="font-mono text-slate-100">
-                X{telemetry.workPos.x.toFixed(2)} Y{telemetry.workPos.y.toFixed(2)} Z
-                {telemetry.workPos.z.toFixed(2)}
+                X{telemetry.workPos.x.toFixed(1)} Y{telemetry.workPos.y.toFixed(1)} Z
+                {telemetry.workPos.z.toFixed(1)}
               </span>
             </div>
+            <span className="text-slate-600" aria-hidden="true">
+              |
+            </span>
+            <span className="font-mono text-sky-300">{telemetry.activeTool.label}</span>
             <span className="text-slate-600" aria-hidden="true">
               |
             </span>
@@ -1017,7 +1360,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
 
           {hoverCoord && (
             <div className="bg-[#11151d]/85 border border-slate-800 rounded px-2.5 py-1 text-[11px] font-mono text-slate-400 w-fit">
-              Table Cursor: X {hoverCoord.x.toFixed(1)} · Y {hoverCoord.y.toFixed(1)} mm
+              Table Cursor (Q4): X {hoverCoord.x.toFixed(1)} · Y {hoverCoord.y.toFixed(1)} mm
             </div>
           )}
         </div>
@@ -1038,7 +1381,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
           </span>
         </div>
 
-        {/* Bottom-Center Collapsible Viewport Dock (per Three.js ergonomic UI rules) */}
+        {/* Bottom-Center Collapsible Viewport Dock */}
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center max-w-[96%]">
           <button
             type="button"
@@ -1060,7 +1403,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
 
           {!dockCollapsed && (
             <div className="bg-[#141923]/95 border border-slate-700/80 rounded-lg px-2.5 py-2 flex flex-wrap items-center justify-center gap-1.5 shadow-lg">
-              {/* Camera Presets */}
               <div className="flex items-center gap-1 pr-2 border-r border-slate-700/70">
                 {(['iso', 'top', 'front', 'side', 'fit'] as CameraPreset[]).map((preset) => (
                   <button
@@ -1074,7 +1416,6 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
                 ))}
               </div>
 
-              {/* Follow Tool & Layer Toggles */}
               <button
                 type="button"
                 onClick={() => setFollowTool((v) => !v)}
@@ -1137,7 +1478,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
                 }`}
               >
                 <Box className="w-3.5 h-3.5" />
-                Stock
+                Panel
               </button>
 
               <button
@@ -1149,7 +1490,7 @@ export const CncViewport3D = forwardRef<CncViewportHandle, CncViewport3DProps>(
                     : 'text-slate-400 hover:bg-slate-800 border border-transparent'
                 }`}
               >
-                Gantry
+                Cantilever
               </button>
 
               <div className="pl-1.5 border-l border-slate-700/70">

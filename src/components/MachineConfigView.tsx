@@ -10,34 +10,38 @@ interface MachineConfigViewProps {
   onConnectMoonraker: (url: string) => void;
 }
 
-const KLIPPER_CNC_CFG_SNIPPET = `# Klipper CNC Spindle & G-Code Macro Reference (printer.cfg)
+const KLIPPER_CNC_CFG_SNIPPET = `# SCM Tech 99L Klipper Retrofit — Quadrant 4 Bounds & Boring Block
+[stepper_x]
+position_min: -500
+position_endstop: 0
+position_max: 3000
+
+[stepper_y]
+position_min: -1000
+position_endstop: 0
+position_max: 500
+
+[stepper_z]
+position_min: -10
+position_endstop: 180
+position_max: 180
+
 [pwm_tool spindle]
 pin: PA8
 pwm: True
 hardware_pwm: True
 cycle_time: 0.001
-maximum_mcu_duration: 5
 shutdown_value: 0
 scale: 24000
 
 [gcode_macro M3]
-description: Start spindle CW (M3 S<rpm>)
 gcode:
-  {% set S = params.S|default(12000)|float %}
+  {% set S = params.S|default(14000)|float %}
   SET_PIN PIN=spindle VALUE={S}
 
 [gcode_macro M5]
-description: Stop spindle
 gcode:
-  SET_PIN PIN=spindle VALUE=0
-
-[gcode_macro G20]
-gcode:
-  RESPOND MSG="Warning: Use G21 (mm) in Klipper CNC"
-
-[gcode_macro G54]
-gcode:
-  RESTORE_GCODE_STATE NAME=WCS_G54`;
+  SET_PIN PIN=spindle VALUE=0`;
 
 export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
   config,
@@ -63,7 +67,6 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-      {/* Connection & Machine Envelope Form */}
       <form
         onSubmit={handleSave}
         className="lg:col-span-7 bg-[#151922] border border-slate-800 rounded-lg p-5 flex flex-col gap-5"
@@ -71,10 +74,10 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-100">
-              Klipper Host & CNC Table Configuration
+              SCM Tech 99L Klipper Host & Quadrant 4 Envelope
             </h2>
             <p className="text-xs text-slate-400">
-              Connect to a live Moonraker instance or tune table dimensions and spindle scaling
+              Configure Moonraker WebSocket connection, signed travel limits, and panel dimensions
             </p>
           </div>
           <button
@@ -86,7 +89,6 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
           </button>
         </div>
 
-        {/* Source Mode Selector */}
         <div className="border border-slate-800 rounded-md p-4 bg-[#10131b] flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-semibold text-slate-200">Telemetry Source</span>
@@ -141,56 +143,121 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
           </p>
         </div>
 
-        {/* Table Envelope & Stock */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {/* Signed Axis Bounds (Quadrant 4 SCM Tech 99L) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Table X (mm)</span>
+            <span className="text-slate-400">X Min (mm)</span>
             <input
               type="number"
-              min={50}
-              max={2500}
-              value={draft.bedSize.x}
+              value={draft.axisBounds.min.x}
               onChange={(e) =>
-                setDraft({ ...draft, bedSize: { ...draft.bedSize, x: Number(e.target.value) } })
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    min: { ...draft.axisBounds.min, x: Number(e.target.value) },
+                  },
+                })
               }
               className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Table Y (mm)</span>
+            <span className="text-slate-400">Y Min / Front (mm)</span>
             <input
               type="number"
-              min={50}
-              max={2500}
-              value={draft.bedSize.y}
+              value={draft.axisBounds.min.y}
               onChange={(e) =>
-                setDraft({ ...draft, bedSize: { ...draft.bedSize, y: Number(e.target.value) } })
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    min: { ...draft.axisBounds.min, y: Number(e.target.value) },
+                  },
+                })
               }
               className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Z Travel (mm)</span>
+            <span className="text-slate-400">Z Min (mm)</span>
             <input
               type="number"
-              min={20}
-              max={600}
-              value={draft.bedSize.z}
+              value={draft.axisBounds.min.z}
               onChange={(e) =>
-                setDraft({ ...draft, bedSize: { ...draft.bedSize, z: Number(e.target.value) } })
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    min: { ...draft.axisBounds.min, z: Number(e.target.value) },
+                  },
+                })
+              }
+              className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-slate-400">X Max (mm)</span>
+            <input
+              type="number"
+              value={draft.axisBounds.max.x}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    max: { ...draft.axisBounds.max, x: Number(e.target.value) },
+                  },
+                })
+              }
+              className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-slate-400">Y Max / Rear (mm)</span>
+            <input
+              type="number"
+              value={draft.axisBounds.max.y}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    max: { ...draft.axisBounds.max, y: Number(e.target.value) },
+                  },
+                })
+              }
+              className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-slate-400">Z Max (mm)</span>
+            <input
+              type="number"
+              value={draft.axisBounds.max.z}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  axisBounds: {
+                    ...draft.axisBounds,
+                    max: { ...draft.axisBounds.max, z: Number(e.target.value) },
+                  },
+                })
               }
               className="bg-[#0e1117] border border-slate-700 rounded px-3 py-2 font-mono text-slate-100"
             />
           </label>
         </div>
 
+        {/* Panel Size (Q4) */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Stock Width X (mm)</span>
+            <span className="text-slate-400">Panel Width +X (mm)</span>
             <input
               type="number"
-              min={10}
-              max={2000}
+              min={50}
+              max={3000}
               value={draft.stockSize.x}
               onChange={(e) =>
                 setDraft({ ...draft, stockSize: { ...draft.stockSize, x: Number(e.target.value) } })
@@ -199,11 +266,11 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Stock Depth Y (mm)</span>
+            <span className="text-slate-400">Panel Depth -Y (mm)</span>
             <input
               type="number"
-              min={10}
-              max={2000}
+              min={50}
+              max={1000}
               value={draft.stockSize.y}
               onChange={(e) =>
                 setDraft({ ...draft, stockSize: { ...draft.stockSize, y: Number(e.target.value) } })
@@ -212,11 +279,11 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
-            <span className="text-slate-400">Stock Height Z (mm)</span>
+            <span className="text-slate-400">Panel Thickness Z (mm)</span>
             <input
               type="number"
               min={1}
-              max={200}
+              max={180}
               value={draft.stockSize.z}
               onChange={(e) =>
                 setDraft({ ...draft, stockSize: { ...draft.stockSize, z: Number(e.target.value) } })
@@ -265,15 +332,14 @@ export const MachineConfigView: React.FC<MachineConfigViewProps> = ({
         </div>
       </form>
 
-      {/* Klipper CNC printer.cfg Reference */}
       <section className="lg:col-span-5 bg-[#151922] border border-slate-800 rounded-lg p-5 flex flex-col gap-3">
         <div className="flex items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold text-slate-100">
-              Klipper CNC Firmware Reference
+              SCM Tech 99L Klipper printer.cfg
             </h2>
             <p className="text-xs text-slate-400">
-              Add these macros to printer.cfg for M3/M5 spindle and G54 support
+              Quadrant 4 travel limits (-500..3000, -1000..500, -10..180) and spindle macros
             </p>
           </div>
           <button

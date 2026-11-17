@@ -4,11 +4,24 @@ export interface Vec3 {
   z: number;
 }
 
+export interface AxisBounds {
+  min: Vec3;
+  max: Vec3;
+}
+
 export type MoveType = 'rapid' | 'cut' | 'plunge' | 'arc';
 
 export type WcsName = 'G54' | 'G55' | 'G56' | 'G57' | 'G58' | 'G59';
 
 export type WcsOffsetMap = Record<WcsName, Vec3>;
+
+export type HeadToolMode = 'spindle' | 'v_drill' | 'h_drill' | 'saw';
+
+export interface ActiveHeadTool {
+  mode: HeadToolMode;
+  index: number; // 0 for spindle/saw, 1..14 for top vertical drills, 1..6 for side horizontal drills
+  label: string;
+}
 
 export interface ToolpathSegment {
   start: Vec3;
@@ -17,6 +30,7 @@ export interface ToolpathSegment {
   feedrate: number;
   lineNumber: number;
   spindleRpm: number;
+  toolCode?: number; // T0 spindle, T1-T14 top drills, T21-T26 side drills, T30 saw
 }
 
 export interface ParsedGCode {
@@ -42,14 +56,14 @@ export interface LiveTraceSegment {
 export interface MachineConfig {
   name: string;
   moonrakerUrl: string;
-  bedSize: Vec3; // e.g., 400 x 300 x 100 mm
+  axisBounds: AxisBounds; // SCM Tech 99L: X[-500..3000], Y[-1000..500], Z[-10..180]
   spindleMaxRpm: number;
   spindleOutputPin: string;
   defaultRapidFeed: number; // mm/min
   defaultCutFeed: number;   // mm/min
   probePlateThickness: number;
   stockEnabled: boolean;
-  stockSize: Vec3;
+  stockSize: Vec3; // Quadrant 4 panel: +X width, -Y depth, +Z thickness
 }
 
 export type ConnectionMode = 'emulator' | 'moonraker';
@@ -71,6 +85,7 @@ export interface KlipperTelemetry {
   spindleRpm: number;
   spindleTargetRpm: number;
   spindleOverride: number; // percent (50..150)
+  activeTool: ActiveHeadTool;
   activeLineIndex: number;
   jobProgress: number; // 0..1
   jobFilename: string | null;

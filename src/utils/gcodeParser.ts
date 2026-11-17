@@ -8,12 +8,12 @@ interface ParserState {
   plane: 17 | 18 | 19; // G17 XY, G18 XZ, G19 YZ
   feedrate: number;
   spindleRpm: number;
+  toolCode: number;
 }
 
-const ARC_STEP_MM = 0.6;
+const ARC_STEP_MM = 0.8;
 
 function stripComments(rawLine: string): string {
-  // Remove (...) comments and ; ... comments
   return rawLine
     .replace(/\([^)]*\)/g, '')
     .replace(/;.*$/, '')
@@ -43,7 +43,6 @@ function subdivideArc(
   kVal: number | undefined,
   rVal: number | undefined,
 ): Vec3[] {
-  // Select plane axes: u (horizontal), v (vertical), w (helical)
   const getUV = (p: Vec3): [number, number, number] => {
     if (plane === 17) return [p.x, p.y, p.z];
     if (plane === 18) return [p.z, p.x, p.y];
@@ -86,7 +85,6 @@ function subdivideArc(
     const mv = (sv + ev) / 2;
     const nu = -dv / chord;
     const nv = du / chord;
-    // Pick center based on CW/CCW and sign of R
     const sign = (clockwise ? -1 : 1) * (rVal > 0 ? 1 : -1);
     cu = mu + sign * h * nu;
     cv = mv + sign * h * nv;
@@ -105,7 +103,6 @@ function subdivideArc(
 
   if (clockwise) {
     if (sweep >= 0) sweep -= Math.PI * 2;
-    // Full circle if start == end
     if (Math.hypot(eu - su, ev - sv) < 1e-4) sweep = -Math.PI * 2;
   } else {
     if (sweep <= 0) sweep += Math.PI * 2;
@@ -123,27 +120,27 @@ function subdivideArc(
     const w = sw + (ew - sw) * t;
     points.push(fromUV(u, v, w));
   }
-  // Snap last point exactly to target
   points[points.length - 1] = { ...end };
   return points;
 }
 
 export function parseGCode(
   source: string,
-  defaultRapidFeed = 3000,
-  defaultCutFeed = 800,
+  defaultRapidFeed = 12000,
+  defaultCutFeed = 3500,
 ): ParsedGCode {
   const lines = source.split(/\r?\n/);
   const segments: ToolpathSegment[] = [];
 
   const state: ParserState = {
-    pos: { x: 0, y: 0, z: 10 },
+    pos: { x: 0, y: 0, z: 45 },
     absolute: true,
     unitsScale: 1,
     motionMode: 0,
     plane: 17,
     feedrate: defaultCutFeed,
     spindleRpm: 0,
+    toolCode: 0,
   };
 
   const min: Vec3 = { x: Infinity, y: Infinity, z: Infinity };
@@ -201,12 +198,15 @@ export function parseGCode(
         case 'M': {
           const code = Math.round(value);
           if (code === 3 || code === 4) {
-            if (state.spindleRpm === 0) state.spindleRpm = 12000;
+            if (state.spindleRpm === 0) state.spindleRpm = 14000;
           } else if (code === 5) {
             state.spindleRpm = 0;
           }
           break;
         }
+        case 'T':
+          state.toolCode = Math.round(value);
+          break;
         case 'S':
           state.spindleRpm = Math.max(0, value);
           break;
@@ -254,7 +254,7 @@ export function parseGCode(
       const next: Vec3 = {
         x: homeAll || homeAxes.x ? 0 : state.pos.x,
         y: homeAll || homeAxes.y ? 0 : state.pos.y,
-        z: homeAll || homeAxes.z ? 25 : state.pos.z,
+        z: homeAll || homeAxes.z ? 120 : state.pos.z,
       };
       const dist = Math.hypot(
         next.x - state.pos.x,
@@ -269,6 +269,7 @@ export function parseGCode(
           feedrate: defaultRapidFeed,
           lineNumber: idx,
           spindleRpm: state.spindleRpm,
+          toolCode: state.toolCode,
         });
         rapidLengthMm += dist;
         totalLengthMm += dist;
@@ -316,6 +317,7 @@ export function parseGCode(
             feedrate: state.feedrate,
             lineNumber: idx,
             spindleRpm: state.spindleRpm,
+            toolCode: state.toolCode,
           });
           updateBounds(prev);
           updateBounds(pt);
@@ -349,6 +351,7 @@ export function parseGCode(
           feedrate: feed,
           lineNumber: idx,
           spindleRpm: state.spindleRpm,
+          toolCode: state.toolCode,
         });
         updateBounds(state.pos);
         updateBounds(endPos);

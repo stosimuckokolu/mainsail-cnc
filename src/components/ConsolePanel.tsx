@@ -14,7 +14,7 @@ const QUICK_MACROS = [
   { label: 'G92 X0 Y0', cmd: 'G92 X0 Y0' },
   { label: 'M3 S12000', cmd: 'M3 S12000' },
   { label: 'M5', cmd: 'M5' },
-  { label: 'Demo Cut', cmd: 'G1 X90 Y40 F1400' },
+  { label: 'Demo Cut', cmd: 'G1 X350 Y-250 F4500' },
   { label: 'Restart', cmd: 'FIRMWARE_RESTART' },
 ];
 
